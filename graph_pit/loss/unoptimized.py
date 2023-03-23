@@ -17,35 +17,40 @@ from graph_pit.utils import validate_inputs
 
 
 def solve_graph_pit(
-        estimate: torch.Tensor,
+        vad_estimate: torch.Tensor,
+        begin_estimate: torch.Tensor,
         targets: List[torch.Tensor],
         segment_boundaries: List[Tuple[int, int]],
         graph: Graph,
-        loss_fn: Callable
-) -> Tuple[torch.Tensor, Tuple[int, ...], torch.Tensor]:
+        vad_loss_fn: Callable,
+        begin_loss_fn: Callable
+) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, ...], torch.Tensor]:
     colorings = list(graph.enumerate_graph_colorings(
-        max_num_colors=estimate.shape[0]))
+        max_num_colors=vad_estimate.shape[0]))
     if len(colorings) == 0:
         raise ValueError(f'No coloring found for graph! graph: {graph}')
 
-    validate_inputs(estimate, targets, segment_boundaries)
-
-    best_loss = None
+    validate_inputs(vad_estimate, targets, segment_boundaries)
+    
+    best_vad_loss = None
+    best_begin_loss = None
     best_coloring = None
     best_target_sum = None
 
     for coloring in colorings:
         # Construct targets matching the current coloring
-        target_sum = target_sum_from_target_list(
-            estimate, targets, segment_boundaries, coloring
+        target_sum, target_begin, target_weight = target_sum_from_target_list(
+            vad_estimate, targets, segment_boundaries, coloring
         )
-        loss = loss_fn(estimate, target_sum)
-        if best_loss is None or loss < best_loss:
-            best_loss = loss
+        vad_loss = vad_loss_fn(vad_estimate, target_sum, weight=target_weight)
+        begin_loss = begin_loss_fn(begin_estimate, target_begin)
+        if best_vad_loss is None or vad_loss < best_vad_loss:
+            best_vad_loss = vad_loss
+            best_begin_loss = begin_loss
             best_coloring = coloring
             best_target_sum = target_sum
 
-    return best_loss, best_coloring, best_target_sum
+    return best_vad_loss, best_begin_loss, best_coloring, best_target_sum
 
 
 @dataclass
@@ -58,34 +63,37 @@ class GraphPITLoss(GraphPITBase):
     because individual steps of the loss computation are factored out into
     different methods that can easily be overwritten.
     """
-    loss_fn: Callable = mse_loss
+    vad_loss_fn: Callable = mse_loss
+    begin_loss_fn: Callable = mse_loss
 
     @property
     def loss(self) -> torch.Tensor:
-        return self._loss[0]
+        return self._loss[0], self._loss[1]
 
     @property
     def best_coloring(self) -> Tuple[int]:
-        return self._loss[1]
+        return self._loss[2]
 
     @property
     def best_target_sum(self) -> torch.Tensor:
-        return self._loss[2]
+        return self._loss[3]
 
     @cached_property
     def _loss(self):
         return solve_graph_pit(
-            self.estimate, self.targets, self.segment_boundaries, self.graph,
-            self.loss_fn
+            self.vad_estimate, self.begin_estimate, self.targets, self.segment_boundaries, self.graph,
+            self.vad_loss_fn, self.begin_loss_fn
         )
 
 
 def graph_pit_loss(
-        estimate: torch.Tensor,
+        vad_estimate: torch.Tensor,
+        begin_estimate: torch.Tensor,
         targets: List[torch.Tensor],
         segment_boundaries: List[Tuple[int, int]],
         graph_segment_boundaries: List[Tuple[int, int]] = None,
-        loss_fn: Callable = mse_loss,
+        vad_loss_fn: Callable = mse_loss,
+        begin_loss_fn: Callable = mse_loss,
 ) -> torch.Tensor:
     """
     Graph-PIT loss function.
@@ -108,8 +116,8 @@ def graph_pit_loss(
         loss
     """
     return GraphPITLoss(
-        estimate, targets, segment_boundaries, graph_segment_boundaries,
-        loss_fn
+        vad_estimate, begin_estimate, targets, segment_boundaries, graph_segment_boundaries,
+        vad_loss_fn, begin_loss_fn
     ).loss
 
 
@@ -121,22 +129,25 @@ class GraphPITLossModule(LossModule):
     approach for the model, e.g., with `pt.Configurable`.
     """
 
-    def __init__(self, loss_fn):
+    def __init__(self, vad_loss_fn, begin_loss_fn):
         super().__init__()
-        self.loss_fn = loss_fn
+        self.vad_loss_fn = vad_loss_fn
+        self.begin_loss_fn = begin_loss_fn
 
     def get_loss_object(
             self,
-            estimate: torch.Tensor,
+            vad_estimate: torch.Tensor,
+            begin_estimate: torch.Tensor,
             targets: List[torch.Tensor],
             segment_boundaries: List[Tuple[int, int]],
             graph_segment_boundaries: List[Tuple[int, int]] = None,
             **kwargs,  # unused here
     ) -> GraphPITLoss:
         return GraphPITLoss(
-            estimate, targets, segment_boundaries,
+            vad_estimate, begin_estimate, targets, segment_boundaries,
             graph_segment_boundaries=graph_segment_boundaries,
-            loss_fn=self.loss_fn,
+            vad_loss_fn=self.vad_loss_fn,
+            begin_loss_fn=self.begin_loss_fn,
         )
 
 
@@ -160,8 +171,13 @@ def target_sum_from_target_list(
 
     """
     target_sum = torch.zeros_like(estimate)
+    target_begin = torch.zeros_like(estimate)
+    target_weight = torch.ones_like(estimate)
     for idx, ((start, stop), (target_index, estimate_index)) in enumerate(zip(
             segment_boundaries, enumerate(permutation)
     )):
         target_sum[estimate_index, start:stop] += targets[target_index]
-    return target_sum
+        target_begin[estimate_index, start] = 1
+        target_weight[estimate_index, max(0, start - 10):min(len(estimate[0]), start + 10)] = 0
+        target_weight[estimate_index, max(0, stop - 10):min(len(estimate[0]), stop + 10)] = 0
+    return target_sum, target_begin, target_weight

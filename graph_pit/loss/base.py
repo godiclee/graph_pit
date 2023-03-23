@@ -10,14 +10,15 @@ from ..utils import validate_inputs
 
 @dataclass
 class GraphPITBase:
-    estimate: torch.Tensor
+    vad_estimate: torch.Tensor
+    begin_estimate: torch.Tensor
     targets: List[torch.Tensor]
     segment_boundaries: List[Tuple[int, int]]   # Used to efficiently compute the loss
     graph_segment_boundaries: List[Tuple[int, int]] = None  # Used for constructing the overlap graph
 
     def __post_init__(self):
         # Check inputs
-        validate_inputs(self.estimate, self.targets, self.segment_boundaries)
+        validate_inputs(self.vad_estimate, self.targets, self.segment_boundaries)
 
         if self.graph_segment_boundaries is None:
             self.graph_segment_boundaries = self.segment_boundaries
@@ -47,7 +48,8 @@ class GraphPITBase:
 class LossModule(torch.nn.Module):
     def get_loss_object(
             self,
-            estimate: torch.Tensor,
+            vad_estimate: torch.Tensor,
+            begin_estimate: torch.Tensor,
             targets: List[torch.Tensor],
             segment_boundaries: List[Tuple[int, int]],
             graph_segment_boundaries: List[Tuple[int, int]] = None,
@@ -57,12 +59,13 @@ class LossModule(torch.nn.Module):
 
     def forward(
             self,
-            estimate: torch.Tensor,
+            vad_estimate: torch.Tensor,
+            begin_estimate: torch.Tensor,
             targets: List[torch.Tensor],
             segment_boundaries: List[Tuple[int, int]],
             graph_segment_boundaries: List[Tuple[int, int]] = None,
             **kwargs,   # for additional arguments for modified losses
     ) -> torch.Tensor:
-        return self.get_loss_object(estimate, targets, segment_boundaries,
+        return self.get_loss_object(vad_estimate, begin_estimate, targets, segment_boundaries,
                                     graph_segment_boundaries,
                                     **kwargs).loss
